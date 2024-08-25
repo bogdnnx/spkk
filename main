@@ -1,0 +1,82 @@
+from argparse import ArgumentParser
+from pyodbc import connect
+from sshtunnel import SSHTunnelForwarder
+from datetime import datetime, timedelta
+from conn import DBConnection
+from asyncio import run
+
+#--login aaaaaa --password aaaaaaaa --year 2024 --month 4 --file "./2024.04.csv"
+
+if __name__ == '__main__':
+    parser = ArgumentParser()
+    parser.add_argument("--login", "-l", nargs="?", type=str)
+    parser.add_argument("--password", "-p", nargs="?", type=str)
+    parser.add_argument("--year", "-y", nargs="?", type=int)
+    parser.add_argument("--month", "-m", nargs="?", type=int)
+    parser.add_argument("--file", "-f", nargs="?", type=str, help="CSV файл")
+
+    args = parser.parse_args()
+
+    # # ДЛЯ ЛЮДЕЙ
+    # def file_to_sql(path: str):
+    #     with open(path, "r") as csv:
+    #         for hour, line in enumerate(csv.readlines(), 7):
+    #             for day, value in enumerate(line.split(";"), 1):
+    #                 # print(hour, day, value)
+    #                 yield datetime(args.year, args.month, day) + timedelta(hours=hour), int(value.strip())
+    #                 if hour == 24 + 3:
+    #                     yield from (
+    #                         (datetime(args.year, args.month, day) + timedelta(hours=hour + hour_i), int(value.strip()))
+    #                         for hour_i in range(1, 4)
+    #                     )
+
+    # ДЛЯ ЭРЛАНГА
+    def parse_file(year: int = args.year, month: int = args.month, path: str = './'+str(args.year)+'.'+str(args.month).zfill(2)+' ERLANG.csv') -> dict[datetime, int]:
+        print(month)
+        with open(path) as file:
+            total_hours = []
+            total_people = []
+            raw = []
+            for row in file:
+                raw.append(row)
+            try:
+                for row in raw[:25]:
+                    hours = [int(i) for i in row.split(',')]  # Дёргаем по часам, убираем данные о часе и дне
+                    total_hours.append(hours)
+                for row in raw[25:]:
+                    people = [int(i) for i in row.split(',')]
+                    total_people.append(people)
+
+                # for i, el in enumerate(total_hours[1:]):
+                #     print(el, total_people[i])
+                forecast = []
+
+                for day in total_hours[0]:
+                    for hour, value in enumerate(total_hours[1:]):
+                        print(hour)
+                        print(value)
+                        forecast.append(((datetime(year, month, day) + timedelta(hours=hour)), value[day - 1], total_people[hour][day-1]))
+
+                for key in forecast:
+                    print(key)
+                return forecast
+            except Exception as E:
+                print(E)
+
+    arguments_erlang = parse_file()
+    print(arguments_erlang)
+    arguments = tuple((x[0], x[2]) for x in arguments_erlang)
+
+    query = f"INSERT INTO people_graph (dt, count) VALUES {','.join(['(%s, %s)'] * len(arguments))}"
+    query2 = f"INSERT INTO forecast_erlang (dt, calls, people) VALUES {','.join(['(%s, %s, %s)'] * len(arguments_erlang))}"
+
+    print(query)
+    print(query2)
+    arguments_raw = tuple((y for x in arguments for y in x))
+    arguments_erlang_raw = tuple((y for x in arguments_erlang for y in x))
+    print(arguments_erlang_raw)
+    conn = DBConnection()
+    a = run(conn.get_data(query, arguments_raw))
+    b = run(conn.get_data(query2, arguments_erlang_raw))
+    print(a)
+    print(b)
