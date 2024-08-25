@@ -1,0 +1,752 @@
+from functools import partial
+
+from PyQt6.QtGui import *
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import *
+
+import sys
+import cv2
+import numpy as np
+
+from worker import Worker
+
+import os
+
+from good_func import smart_time_string, printProgressBar
+from data_import_manager import DataImportManagerWindow
+from time import perf_counter
+from datetime import datetime
+
+import pandas as pd
+
+IMG_SIZE = 200
+
+MAIN_FOLDER = os.getcwd()
+
+LABEL_SAVE_FOLDER = f'{MAIN_FOLDER}/labeler/labels'
+DATA_FOLDER = f'{MAIN_FOLDER}/window_dataset/saved_data'
+
+# LABEL_SAVE_FOLDER = 'C:/Users/mecco/Downloads/New_data/labeler/labels'
+# DATA_FOLDER = 'C:/Users/mecco/Downloads/New_data/window_dataset/saved_data'
+
+# data_df = pd.read_excel('classification/classified/all_data.xlsx')
+
+# data_df.to_parquet('classification/classified/all_data.parquet')
+
+# data_df = pd.DataFrame()
+
+# Подверждение при выходе
+
+def trim_dt_from_file_name(img_name):
+    image_date = img_name[-18:-4]
+    img_year = image_date[:4]
+    img_month = image_date[4:6]
+    image_day = image_date[6:8]
+    image_hour = image_date[8:10]
+    image_minute = image_date[10:12]
+    image_second = image_date[12:14]
+
+    return f'{img_year}-{img_month}-{image_day} {image_hour}:{image_minute}:{image_second}'
+
+data_df = pd.read_parquet('classification/classified/all_data.parquet')
+
+data_df_with_dates = data_df.copy()
+data_df_with_dates['DateTime'] = data_df_with_dates['file_name'].apply(lambda x: trim_dt_from_file_name(x))
+data_df_with_dates['DateTime'] = pd.to_datetime(data_df_with_dates['DateTime'], format='%Y-%m-%d %H:%M:%S')
+
+print(data_df)
+
+class_colors = {
+    'horizon':  QBrush(QColor(161, 255, 224)), # Ночь, сияние на горизонте (161, 255, 224)
+    'broken':   QBrush(QColor(255, 0, 191)), # Сломанное изображение (255, 0, 191)
+    'discrete': QBrush(QColor(10, 190, 196)), # Ярко выраженные сияния ноч (10, 190, 196)
+    'arc':      QBrush(QColor(245, 198, 59)), # Дуга, арка сияние ночь (245, 198, 59)
+    'diffuse':  QBrush(QColor(5, 166, 24)), # Диффузное сияние нчь (5, 166, 24)
+
+    'clear':    QBrush(QColor(0, 0, 0)), # Чистое небо, ночь (0, 0, 0)
+    'dod':      QBrush(QColor(3, 86, 252)), # Чистое небо, день (3, 86, 252)
+    'cloud':    QBrush(QColor(110, 109, 109)), # облачно (110, 109, 109)
+
+    'apc':      QBrush(QColor(98, 5, 179)), # облачно сияние ночь не важно какое (98, 5, 179)
+    'apm':      QBrush(QColor(189, 51, 9)), # день сияние не важно какое (189, 51, 9)
+}
+
+class_ru_names ={
+    'horizon':  'Сияние на горизонте',
+    'broken':   'Изображение сломано',
+    'discrete': 'Сияние Ярко-выраженное',
+    'arc':      'Сияние Дуга',
+    'diffuse':  'Сияние Диффузное',
+
+    'clear':    'Чистое небо, ночь',
+    'dod':      'Чистое небо, день',
+    'cloud':    'Облачно, Ночь',
+
+    'apc':      'Сияние, Облачно, Ночь',
+    'apm':      'Сияние, День',
+}
+
+for class_name, class_color in class_colors.items():
+    c = class_color.color()
+    print(f"'{class_name}': [{c.red()}, {c.green()}, {c.blue()}],")
+
+
+current_changes_dict = {}
+
+def cv_to_pixmap(img):
+    convert = QImage(img, img.shape[1], img.shape[0], img.strides[0], QImage.Format.Format_BGR888)
+    return convert
+
+def get_info(img_name):
+    found_in_df = data_df.loc[data_df['file_name'] == img_name]
+    
+    found_in_df = found_in_df.iloc[0]
+    found_dict = found_in_df.to_dict()
+
+    found_dict.pop('Unnamed: 0')
+    found_dict.pop('file_name')
+
+    found_dict = sorted(found_dict.items(), key=lambda x:x[1], reverse=True)
+
+    return found_dict
+
+def get_class_name(img_name):
+    info = get_info(img_name)
+
+    class_name, _ = info[0]
+    return class_name
+
+
+def get_color(img_name):
+    class_name = get_class_name(img_name)
+    
+    return class_colors[class_name]
+
+
+def add_info(img, img_path):
+    found_dict = get_info(img_path)
+
+    shown_at_least_one_class = False
+    for ind, (class_name, class_val) in enumerate(found_dict):
+
+        if (class_val < 0.1 and shown_at_least_one_class):
+            continue
+
+        img = cv2.putText(img, f'{class_name}: {class_val:.2f}', (10, 30*(ind+2)), cv2.FONT_HERSHEY_SIMPLEX , 1 , (0, 0, 0) , 2, cv2.LINE_AA) 
+        img = cv2.putText(img, f'{class_name}: {class_val:.2f}', (10, 30*(ind+2)), cv2.FONT_HERSHEY_SIMPLEX , 1 , (255, 255, 255) , 1, cv2.LINE_AA)
+
+        shown_at_least_one_class = True
+    print(found_dict)
+
+    # img = cv2.copyMakeBorder(img, BORDER_SIZE, BORDER_SIZE, BORDER_SIZE, BORDER_SIZE, cv2.BORDER_CONSTANT, (255, 255, 255))
+
+
+    return img
+
+def convertQImageToMat(incomingImage):
+
+    incomingImage = incomingImage.convertToFormat(QImage.Format.Format_BGR888)
+
+    width = incomingImage.width()
+    height = incomingImage.height()
+
+    ptr = incomingImage.bits()
+    ptr.setsize(incomingImage.sizeInBytes())
+    arr = np.array(ptr).reshape(height, width, 3)  #  Copies the data
+    return arr
+
+global_time_start = perf_counter()
+
+class LoadingWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Importing progress")
+        self.resize(500, 150)
+
+        self.lo = QVBoxLayout()
+
+        self.label = QLabel()
+        self.label.setText("Some text")
+        self.lo.addWidget(self.label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(69)
+        self.lo.addWidget(self.progress_bar)
+
+        self.setLayout(self.lo)
+
+
+class MainWidget(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Simple classes show")
+        self.resize(720, 480)
+        self.setAcceptDrops(True)
+        self.scroll = QScrollArea() 
+        self.widget = QWidget()
+
+        self.in_deleting_process = False
+
+
+        self.outer_layout = QHBoxLayout()
+        self.right_layout = QVBoxLayout()
+
+        # self.label = QLabel(self)
+        # self.outer_layout.addWidget(self.label)
+
+
+        self.list_widget=QListWidget()
+        self.list_widget.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Minimum)
+        # self.list_widget.setMinimumHeight(IMG_SIZE*5)
+        self.list_widget.setMinimumWidth(IMG_SIZE*7)
+        self.list_widget.setFlow(QListWidget.Flow.LeftToRight)
+        self.list_widget.setViewMode(QListView.ViewMode.IconMode)
+        self.list_widget.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
+        self.list_widget.setSelectionMode(QListView.SelectionMode.ExtendedSelection)
+        self.list_widget.itemSelectionChanged.connect(self.selection_changed)
+        self.list_widget.setIconSize(QSize(IMG_SIZE, IMG_SIZE))
+        self.list_widget.setDragEnabled(False)
+        # self.list_widget.currentItemChanged.connect(self.selection_changed)
+        # self.list_widget.itemChanged.connect(self.selection_changed)
+        # self.list_widget.currentRowChanged.connect(self.selection_changed)
+        # self.list_widget.itemClicked.connect(self.selection_changed)
+        self.outer_layout.addWidget(self.list_widget)
+
+        self.big_render = QLabel(self)
+        self.right_layout.addWidget(self.big_render)
+
+        self.img_info_text = QLabel(self)
+        self.img_info_text.setFont(QFont('Courier', 14))
+        self.right_layout.addWidget(self.img_info_text)
+
+
+        self.class_buttons = []
+        btn_row_layout = QHBoxLayout()
+
+        for ind, (class_name, class_brush) in enumerate(class_colors.items()):
+
+            color_btn = QPushButton()
+            c = class_brush.color()
+            color_btn.setStyleSheet(f"QPushButton {{ background-color: rgb({c.red()}, {c.green()}, {c.blue()})}}")
+            color_btn.setEnabled(False)
+            color_btn.setFixedSize(32, 26)
+
+            
+            
+            btn = QPushButton()
+            btn.clicked.connect(partial(self.class_button_func, class_name))
+            btn.setText(class_ru_names[class_name])
+
+            btn_row_layout.addWidget(color_btn)
+            btn_row_layout.addWidget(btn)
+
+            if (ind % 2 == 1):
+                self.right_layout.addLayout(btn_row_layout)
+                btn_row_layout = QHBoxLayout()
+            
+
+        self.outer_layout.addLayout(self.right_layout)
+
+
+        self.widget.setLayout(self.outer_layout)
+
+        #Scroll Area Properties
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setWidget(self.widget)
+
+        self.setCentralWidget(self.scroll)
+
+
+        menubar = self.menuBar()
+        fileMenu = menubar.addMenu('&Файл')
+
+        list_import_data = QAction('Импортировать данные', self)
+        list_import_data.setShortcut('Ctrl+I')
+        list_import_data.setStatusTip('Import Data')
+        list_import_data.triggered.connect(self.show_data_manager_window)
+        fileMenu.addAction(list_import_data)
+
+        list_save_changes = QAction('Сохранить', self)
+        list_save_changes.setShortcut('Ctrl+S')
+        list_save_changes.setStatusTip('Save Changes')
+        list_save_changes.triggered.connect(self.list_save_changes_func)
+        fileMenu.addAction(list_save_changes)
+
+        editMenu = menubar.addMenu('&Изменить')
+        
+        list_zoom_in = QAction('Приблизить', self)
+        list_zoom_in.setShortcut('Ctrl++')
+        list_zoom_in.setStatusTip('Zoom in list')
+        list_zoom_in.triggered.connect(self.list_zoom_in_func)
+        editMenu.addAction(list_zoom_in)
+
+        list_zoom_out = QAction('Отдалить', self)
+        list_zoom_out.setShortcut('Ctrl+-')
+        list_zoom_out.setStatusTip('Zoom out list')
+        list_zoom_out.triggered.connect(self.list_zoom_out_func)
+        editMenu.addAction(list_zoom_out)
+
+        list_delete_sel = QAction('Удалить выбранные', self)
+        list_delete_sel.setShortcut('Del')
+        list_delete_sel.setStatusTip('Delete Selected')
+        list_delete_sel.triggered.connect(self.list_delete_sel_func)
+        editMenu.addAction(list_delete_sel)
+
+        list_clear_sel = QAction('Очистить выбранные', self)
+        list_clear_sel.setShortcut('Backspace')
+        list_clear_sel.setStatusTip('Clear Selected')
+        list_clear_sel.triggered.connect(self.list_clear_sel_func)
+        editMenu.addAction(list_clear_sel)
+
+        self.showMaximized() 
+        self.selection_changed()
+
+    def closeEvent(self, event):
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Внимание")
+        dlg.setText(f"Остался несохраненный прогресс из {len(current_changes_dict)} элементов.\nВы действительно хотите выйти?")
+        # dlg.setStandardButtons(QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel)
+
+        btn_save = dlg.addButton('Сохранить и выйти', QMessageBox.ButtonRole.AcceptRole, )
+        btn_discard = dlg.addButton('Не сохранять и выйти', QMessageBox.ButtonRole.HelpRole)
+        btn_cancel = dlg.addButton('Отмена', QMessageBox.ButtonRole.NoRole)
+
+        button = dlg.exec()
+
+        
+
+        print(dlg.buttons()[button])
+
+        if dlg.buttons()[button] == btn_save:
+            self.list_save_changes_func()
+            return
+
+        if dlg.buttons()[button] == btn_discard:
+            print('discard')
+            return
+        
+        if dlg.buttons()[button] == btn_cancel:
+            event.ignore()
+
+        event.ignore()
+        
+        
+
+    def show_data_manager_window(self):
+        self.data_manager_window = DataImportManagerWindow()
+        self.data_manager_window.df = data_df_with_dates.copy()
+        self.data_manager_window.data_folder = DATA_FOLDER
+        self.data_manager_window.files_obj.files_signal.connect(self.start_importing_files)
+        
+        date_from = data_df_with_dates['DateTime'].min().strftime('%Y-%m-%d')
+        date_to = data_df_with_dates['DateTime'].max().strftime('%Y-%m-%d')
+
+        print(date_from, date_to)
+
+        self.data_manager_window.set_date_boundaries(date_from, date_to)
+
+        self.data_manager_window.show()
+
+
+    def start_importing_files(self, files, input_classes, add_classes_from_df, add_classes_from_table):
+
+        self.open_progress_bar_window()
+
+        self.thread = QThread()
+
+        self.worker = Worker()
+        self.worker.files = files
+        self.worker.input_classes = input_classes
+        self.worker.data_folder = DATA_FOLDER
+        self.worker.class_colors = class_colors
+        self.worker.data_df = data_df.copy()
+        self.worker.add_classes_from_df = add_classes_from_df
+        self.worker.add_classes_from_table = add_classes_from_table
+
+        self.worker.moveToThread(self.thread)
+
+        self.thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+
+        self.worker.add_item_signal.connect(self.add_item_to_list)
+        self.worker.progress.connect(self.update_progress_bar)
+
+        self.thread.start()
+
+        self.thread.finished.connect(self.importing_data_complete)
+
+    def open_progress_bar_window(self):
+        self.pb_window = LoadingWindow()
+        self.pb_window.show()
+
+    def add_item_to_list(self, item):
+
+        self.list_widget.addItem(item)
+
+        # current_changes_dict[f_name] = class_name
+
+        # self.list_widget.item(i).setBackground(class_colors[class_name])f
+
+    def update_progress_bar(self, val_and_text):
+        val, text = val_and_text
+
+        self.pb_window.label.setText(str(text))
+        self.pb_window.progress_bar.setValue(int(val*100))
+
+    def importing_data_complete(self):
+        print("Finished importing")
+
+        self.pb_window.label.setText("Classifying...")
+        self.pb_window.progress_bar.setValue(100)
+
+        # self.restore_all_items()
+
+        self.pb_window.close()
+        del self.pb_window
+
+        QMessageBox.about(self, "Сообщение", "Импорт завершен!")
+
+
+    def list_clear_sel_func(self):
+        selected = self.list_widget.selectedIndexes()
+        # while 
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Внимание")
+        dlg.setText(f"Выбрано {len(selected)} элементов. Вы действительно хотите их очистить?")
+        dlg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.No)
+        button = dlg.exec()
+
+        if button == QMessageBox.StandardButton.Ok:
+            pass
+        else:
+            return
+
+        for selected in self.list_widget.selectedItems():
+            try:
+                f_name = selected.text()
+                if (f_name in current_changes_dict):
+                    current_changes_dict.pop(f_name)
+
+                selected.setBackground(QBrush(QColor(255, 255, 255)))
+                
+            except Exception as e:
+                print(str(e))
+
+        self.in_deleting_process = False
+
+        self.selection_changed()
+
+
+    def list_delete_sel_func(self):
+        selected = self.list_widget.selectedIndexes()
+        # while 
+
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Внимание")
+        dlg.setText(f"Выбрано {len(selected)} элементов. Вы действительно хотите их удалить?")
+        dlg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.No)
+        button = dlg.exec()
+
+        if button == QMessageBox.StandardButton.Ok:
+            pass
+        else:
+            return
+
+
+        self.in_deleting_process = True
+
+        
+        while len(selected) > 0:
+            try:
+                to_del = selected[0]
+                deleted = self.list_widget.takeItem(to_del.row())
+                current_changes_dict.pop(deleted.text())
+
+            except Exception as e:
+                print(e)
+
+            selected = self.list_widget.selectedIndexes()
+
+
+        # for to_del in self.list_widget.selectedIndexes():
+        #     try:
+        #         deleted = self.list_widget.takeItem(to_del.row())
+        #         current_changes_dict.pop(deleted.text())
+        #     except Exception as e:
+        #         print(e)
+
+        self.in_deleting_process = False
+
+        self.selection_changed()
+            
+
+    def list_save_changes_func(self):
+        print("Saving...")
+
+        time_now = datetime.now()
+        time_now = time_now.strftime("%Y-%m-%d_%H-%M-%S")
+
+        time_now += f'__{int(perf_counter()-global_time_start)}'
+
+        current_df = pd.DataFrame.from_dict(current_changes_dict, orient='index', columns=['Class'])
+        print(current_df)
+
+        file_name = f'AC_{time_now}.xlsx'
+        file_save_path = os.path.join(LABEL_SAVE_FOLDER, file_name)
+
+        if (len(current_df) < 1):
+            print("WARNING: Found zero rows to save")
+            print("Not saving file")
+            QMessageBox.about(self, "Внимание", "Найдено 0 строк для сохранения.\nНе сохраняем файл")
+            return
+
+        current_df.to_excel(file_save_path, index_label = 'img')
+
+        print("Saving complete!")
+        print(f"Saved to {file_save_path}")
+
+        QMessageBox.about(self, "Сообщение", "Сохранение завершено!")
+        
+
+
+    def class_button_func(self, class_name):
+        
+        for selected in self.list_widget.selectedItems():
+            f_name = selected.text()
+            current_changes_dict[f_name] = class_name
+            selected.setBackground(class_colors[class_name])
+
+    def selection_changed(self):
+
+        if (self.in_deleting_process):
+            return
+
+        # print("CHANGE")
+
+        big_render_img_size = 480
+        
+        selected = self.list_widget.selectedItems()
+        # print(selected)
+        if (len(selected) == 0):
+            self.big_render.clear()
+            if (self.list_widget.count() < 1):
+                self.img_info_text.setText("Перетяните в это окно файлы")
+                return
+            
+            self.img_info_text.setText("Изображения не выбраны")
+            return
+        
+        self.img_info_text.setText('')
+        
+        if (len(selected) == 1):
+        
+            render_item = selected[0]
+            # render_pixmap = render_item.icon().pixmap
+            render_pixmap = render_item.icon().pixmap(big_render_img_size)
+            # print(type(render_pixmap))
+            self.big_render.setPixmap(render_pixmap)
+
+            self.show_info_about_one(render_item.text())
+
+        else:
+            
+            N_selected_orig = len(selected)
+            N_selected_sqrt = int(np.ceil(np.sqrt(N_selected_orig)))
+
+            # print(N_selected_orig, N_selected_sqrt)
+
+            imgs = []
+            cur_row = []
+
+            img_size = 64
+
+            img_names = []
+
+            for sel in selected:
+                pix = sel.icon().pixmap(img_size).toImage()
+                pix = convertQImageToMat(pix)
+                pix = cv2.resize(pix, (img_size, img_size))
+                cur_row.append(pix)
+
+                img_names.append(sel.text())
+
+                if (len(cur_row) == N_selected_sqrt):
+                    imgs.append(np.hstack(cur_row))
+                    cur_row = []
+
+            if ((len(cur_row) != N_selected_sqrt) and (len(cur_row) != 0)):
+                not_enough = N_selected_sqrt - len(cur_row)
+                for _ in range(not_enough):
+                    cur_row.append(np.zeros((img_size, img_size, 3), dtype = np.uint8))
+            
+            if (len(cur_row) != 0):
+                imgs.append(np.hstack(cur_row))
+
+            result_img = np.vstack(imgs)
+            scale_factor = big_render_img_size / result_img.shape[1]
+            result_img = cv2.resize(result_img, (0, 0), fx=scale_factor, fy=scale_factor)
+
+            pixmap = QPixmap.fromImage(cv_to_pixmap(result_img))
+            self.big_render.setPixmap(pixmap)
+
+            self.show_info_about_many(img_names)
+
+    def show_info_about_one(self, img_name):
+        try:        
+            info = get_info(img_name)
+
+            s = f'Вероятности для \n{img_name}\n'
+
+            image_date = img_name[-18:-4]
+            img_year = image_date[:4]
+            img_month = image_date[4:6]
+            image_day = image_date[6:8]
+            image_hour = image_date[8:10]
+            image_minute = image_date[10:12]
+            image_second = image_date[12:14]
+
+            s += f'{img_year}/{img_month}/{image_day} {image_hour}:{image_minute}:{image_second}\n\n'
+
+            # for class_name, class_val in info:
+            #     s += f'{class_name}: {class_val:.2}\n'
+
+            percent = [f'{class_val*100:.3f} %' for _, class_val in info]
+            
+            df_info = pd.DataFrame(info, columns = ['Name', 'Value'])
+            df_info['Value'] = percent
+            df_info['Ru_Name'] = df_info['Name'].replace(class_ru_names)
+            # df_info = df_info.set_index('Name')
+            s += df_info.rename(columns={'Value': 'Значение', 'Name': 'Класс', 'Ru_Name': 'Описание'}).to_string()
+
+            if (img_name in current_changes_dict):
+                cur_class_from_dict = current_changes_dict[img_name]
+                s += f'\n\n\nУстановлено новое значение:\n'
+                s += f'\t{cur_class_from_dict}\n'
+                s += f'\t{class_ru_names[cur_class_from_dict]}\n'
+
+
+
+            self.img_info_text.setText(s)
+
+        except Exception as e:
+            self.img_info_text.setText(str(e))
+
+    def show_info_about_many(self, img_names):
+        try:
+            img_classes = [get_class_name(img_name) for img_name in img_names]
+
+            N_classes = len(img_classes)
+
+            s = f'Подсчет классов для {N_classes} изображений:\n\n'
+
+            unique, counts = np.unique(img_classes, return_counts=True)
+            un_list = list(zip(unique, counts))
+            un_list.sort(key = lambda x: x[1], reverse=True)
+            percent = [f'{count/N_classes*100:.3f} %' for _, count in un_list]
+
+            # for class_name, class_count in un_list:
+            #     s += f'{class_name}: {class_count} or {(class_count/N_classes):.2}%\n'
+
+            df_info = pd.DataFrame(un_list, columns = ['Name', 'Count'])
+            df_info['Frac.'] = percent
+            df_info['Ru_Name'] = df_info['Name'].replace(class_ru_names)
+            # df_info = df_info.set_index('Name')
+            s += df_info.rename(columns={'Frac.': 'Часть', 'Count':'Кол-во', 'Name': 'Класс', 'Ru_Name': 'Описание'}).to_string()
+
+            self.img_info_text.setText(s)
+
+        except Exception as e:
+            self.img_info_text.setText(str(e))
+
+
+    def list_zoom_in_func(self):
+
+        global IMG_SIZE
+
+        
+        if (IMG_SIZE > 256):
+            return
+        
+        IMG_SIZE *= 2
+
+        IMG_SIZE = int(IMG_SIZE)
+        
+        self.list_widget.setIconSize(QSize(IMG_SIZE, IMG_SIZE))
+
+    def list_zoom_out_func(self):
+
+        global IMG_SIZE
+
+        if (IMG_SIZE < 16):
+            return
+        
+        IMG_SIZE /= 2
+
+        IMG_SIZE = int(IMG_SIZE)
+        
+        self.list_widget.setIconSize(QSize(IMG_SIZE, IMG_SIZE))
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+
+        files = [u.toLocalFile() for u in event.mimeData().urls()]
+
+        if (len(files) < 0):
+            return
+        
+        try:
+        
+            if (os.path.splitext(files[0])[-1] == '.xlsx'):
+
+                add_classes_from_table = self.simple_ok_window('Внимание', f"Найдено {len(files)} файлов. Включить отображение цветов?")
+
+                add_classes_from_df = False
+                if not (add_classes_from_table):
+                    add_classes_from_df = self.simple_ok_window('Внимание', f"Найдено {len(files)} файлов. Загрузить классификацию из модели?")
+                
+                file_df = []
+
+                for file in files:
+                    file_df.append(pd.read_excel(file))
+                
+                file_df = pd.concat(file_df, axis=1)
+                files_list = file_df['img'].apply(lambda x: f'{DATA_FOLDER}/{x}').to_list()
+                input_classes = file_df['Class'].to_list()
+
+                self.start_importing_files(files_list, input_classes, add_classes_from_df, add_classes_from_table)
+                           
+            else:
+                add_classes_from_df = self.simple_ok_window('Внимание', f"Найдено {len(files)} файлов. Загрузить классификацию из модели?")
+                    
+                self.start_importing_files(files, None, add_classes_from_df, False)
+
+        except Exception as e:
+            print(e)
+            QMessageBox.about(self, "Ошибка", str(e))
+
+
+    def simple_ok_window(self, label, text):
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle(label)
+        dlg.setText(text)
+        dlg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.No)
+        button = dlg.exec()
+
+        return button == QMessageBox.StandardButton.Ok
+
+
+app = QApplication(sys.argv)
+ui = MainWidget()
+ui.show()
+app.exec()
